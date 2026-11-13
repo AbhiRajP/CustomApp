@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { DisconnectButton } from '@/components/disconnect-button';
 import { AzureConnectionLoader } from '@/components/azure-connection-loader';
+import { fetchWithTimeout } from '@/lib/api';
 import Image from 'next/image';
 import { ArrowRight, BarChart3, LayoutGrid, Layers } from 'lucide-react';
 
@@ -16,11 +17,11 @@ type AuthStatus = { configured: boolean; connected: boolean; tenantId: string | 
 
 const emptyPreferences: Preferences = { subscriptionId: null };
 
-async function apiRequest<T>(url: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(url, {
+async function apiRequest<T>(url: string, init?: RequestInit, timeoutMs = 15_000): Promise<T> {
+  const response = await fetchWithTimeout(url, {
     ...init,
     headers: { 'Content-Type': 'application/json', ...init?.headers },
-  });
+  }, timeoutMs);
   const payload = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(payload.detail ?? `Request failed (${response.status}).`);
   return payload as T;
@@ -37,7 +38,7 @@ export default function ConnectAzurePage() {
 
   const loadConnectedData = useCallback(async () => {
     const [subscriptionResponse, savedPreferences] = await Promise.all([
-      apiRequest<{ items: AzureSubscription[] }>('/api/subscriptions'),
+      apiRequest<{ items: AzureSubscription[] }>('/api/subscriptions', undefined, 60_000),
       apiRequest<Preferences>('/api/preferences'),
     ]);
     setSubscriptions(subscriptionResponse.items);
@@ -202,11 +203,18 @@ export default function ConnectAzurePage() {
                     <span>Sign in and connect Azure</span>
                     <ArrowRight size={22} aria-hidden="true" />
                   </a>
-                ) : (
+                ) : auth ? (
                   <p className="mt-6 max-w-2xl rounded-xl border border-amber-700 bg-amber-950/50 p-4 text-sm text-amber-200">
                     Azure sign-in is not configured yet. Set the required backend environment variables described in
                     <code className="mx-1">backend/.env.example</code>, register the callback URL in Microsoft Entra, and restart the API.
                   </p>
+                ) : (
+                  <button
+                    className="mt-7 inline-flex min-h-14 w-fit items-center justify-between gap-5 rounded-full border border-amber-500/60 bg-amber-950/50 px-5 text-base font-semibold text-amber-100 transition hover:bg-amber-900/60 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-amber-300 sm:px-6"
+                    onClick={() => void refreshAuth()}
+                  >
+                    Retry connection check
+                  </button>
                 )}
               </>
             )}

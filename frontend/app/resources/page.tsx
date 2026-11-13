@@ -5,6 +5,7 @@ import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { ArrowLeft, ArrowRight, Box, Download, Layers, RefreshCw } from 'lucide-react';
 import { DisconnectButton } from '@/components/disconnect-button';
+import { fetchWithTimeout } from '@/lib/api';
 
 type Preferences = { subscriptionId: string | null };
 type AzureResource = {
@@ -59,8 +60,8 @@ function readableResourceType(type: string): string {
   return `${typeSegments.map(readableSegment).join(' / ')} (${readableSegment(providerName)})`;
 }
 
-async function apiRequest<T>(url: string): Promise<T> {
-  const response = await fetch(url);
+async function apiRequest<T>(url: string, timeoutMs = 15_000): Promise<T> {
+  const response = await fetchWithTimeout(url, {}, timeoutMs);
   const payload = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(payload.detail ?? `Request failed (${response.status}).`);
   return payload as T;
@@ -117,7 +118,7 @@ export default function ResourceInventoryPage() {
         return;
       }
       const query = new URLSearchParams({ subscription_id: preferences.subscriptionId });
-      const response = await apiRequest<{ items: AzureResource[] }>(`/api/resources?${query}`);
+      const response = await apiRequest<{ items: AzureResource[] }>(`/api/resources?${query}`, 60_000);
       setResources(response.items);
     } catch (requestError) {
       setError(requestError instanceof Error ? requestError.message : 'Could not load Azure resources.');

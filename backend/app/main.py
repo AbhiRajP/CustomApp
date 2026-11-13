@@ -42,6 +42,17 @@ from app.services.azure_monitoring import (
 logger = logging.getLogger(__name__)
 
 
+class AccessLogQueryFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        arguments = record.args
+        if isinstance(arguments, tuple) and len(arguments) > 2 and isinstance(arguments[2], str):
+            record.args = (*arguments[:2], arguments[2].split("?", 1)[0], *arguments[3:])
+        return True
+
+
+logging.getLogger("uvicorn.access").addFilter(AccessLogQueryFilter())
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     interval_seconds = int(os.getenv("COST_COLLECTION_INTERVAL_SECONDS", "0"))

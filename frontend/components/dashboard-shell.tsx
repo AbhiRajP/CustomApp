@@ -5,6 +5,7 @@ import Link from 'next/link';
 import Image from 'next/image';
 import { DisconnectButton } from './disconnect-button';
 import { AzureConnectionLoader } from './azure-connection-loader';
+import { fetchWithTimeout } from '@/lib/api';
 import {
   ArrowRight,
   ArrowLeftRight,
@@ -16,6 +17,7 @@ import {
   Database,
   Download,
   Layers,
+  Loader2,
   Server,
   Settings,
 } from 'lucide-react';
@@ -86,7 +88,7 @@ function startOfCurrentMonth(): string {
 }
 
 async function apiRequest<T>(url: string): Promise<T> {
-  const response = await fetch(url);
+  const response = await fetchWithTimeout(url);
   const payload = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(payload.detail ?? `Request failed (${response.status}).`);
   return payload as T;
@@ -445,7 +447,7 @@ export function DashboardShell() {
           </section>
         ) : (
           <>
-            {costData && (
+            {costData ? (
               <>
                 <section>
                   <article className="relative flex flex-wrap items-center justify-between gap-4 overflow-hidden rounded-xl border-2 border-sky-500 bg-[linear-gradient(105deg,rgba(6,29,55,0.98),rgba(3,22,44,0.98))] px-4 py-3.5 shadow-[0_10px_32px_rgba(0,140,255,0.08)] sm:px-5">
@@ -755,14 +757,41 @@ export function DashboardShell() {
                               fontWeight={600}
                             />
                           </Bar>
-Billing management                        </BarChart>
+                       </BarChart>
                       </ResponsiveContainer>
                     </div>
                   </div>
                 </section>
 
               </>
-            )}
+            ) : busy ? (
+              <section
+                role="status"
+                aria-live="polite"
+                aria-busy="true"
+                className="dashboard-card overflow-hidden border-sky-500/50"
+              >
+                <div className="flex items-center gap-3">
+                  <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl border border-cyan-400/30 bg-cyan-500/10 text-cyan-300">
+                    <Loader2 size={24} className="animate-spin motion-reduce:animate-none" aria-hidden="true" />
+                  </span>
+                  <div>
+                    <h2 className="text-lg font-semibold text-white">Loading cost details</h2>
+                    <p className="mt-1 text-sm text-slate-300">
+                      Fetching this month&apos;s billing data from Azure. This may take a little while.
+                    </p>
+                  </div>
+                </div>
+                <div aria-hidden="true" className="mt-5 grid gap-4 sm:grid-cols-3">
+                  <div className="h-20 animate-pulse rounded-xl border border-sky-500/20 bg-sky-500/10" />
+                  <div className="h-20 animate-pulse rounded-xl border border-sky-500/20 bg-sky-500/10 [animation-delay:150ms]" />
+                  <div className="h-20 animate-pulse rounded-xl border border-sky-500/20 bg-sky-500/10 [animation-delay:300ms]" />
+                </div>
+                <div aria-hidden="true" className="mt-4 h-2 overflow-hidden rounded-full bg-slate-800">
+                  <div className="h-full w-1/3 animate-pulse rounded-full bg-gradient-to-r from-cyan-400 via-sky-500 to-blue-500" />
+                </div>
+              </section>
+            ) : null}
           </>
         )}
       </div>

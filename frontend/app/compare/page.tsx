@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { ArrowDown, ArrowLeft, ArrowLeftRight, Boxes, CalendarDays, Database, Download, Home, Info, Layers, Server, TrendingUp } from 'lucide-react';
@@ -17,6 +17,7 @@ import {
 } from 'recharts';
 import { DisconnectButton } from '@/components/disconnect-button';
 import { AzureConnectionLoader } from '@/components/azure-connection-loader';
+import { fetchWithTimeout } from '@/lib/api';
 
 type AuthStatus = { configured: boolean; connected: boolean; tenantId: string | null };
 type Preferences = { subscriptionId: string | null };
@@ -49,6 +50,7 @@ type CostData = {
   resourceComparison: { resourceId: string; current: number; previous: number; change: number }[];
 };
 type BillingService = { name: string; cost: number };
+type AvailableService = { name: string; cost: number };
 type BillingResource = { resourceId: string; cost: number };
 type BillingServiceResources = { name: string; resources: BillingResource[] };
 
@@ -216,16 +218,23 @@ export default function CompareCostsPage() {
   const [error, setError] = useState<string | null>(null);
   const [selectedService, setSelectedService] = useState('all');
   const [selectedResourceId, setSelectedResourceId] = useState('all');
+  const [availableServices, setAvailableServices] = useState<{
+    key: string;
+    services: AvailableService[];
+  } | null>(null);
+  const [loadingServices, setLoadingServices] = useState(false);
+  const comparisonRequestInProgress = useRef(false);
+  const serviceLookupInProgress = useRef(false);
 
   useEffect(() => {
     async function initialize() {
       try {
-        const statusResponse = await fetch('/api/auth/status');
+        const statusResponse = await fetchWithTimeout('/api/auth/status');
         const status = await statusResponse.json();
         if (!statusResponse.ok) throw new Error(status.detail ?? 'Could not check the Azure connection.');
         setAuth(status as AuthStatus);
         if (status.connected) {
-          const preferencesResponse = await fetch('/api/preferences');
+          const preferencesResponse = await fetchWithTimeout('/api/preferences');
           const preferences = await preferencesResponse.json();
           if (!preferencesResponse.ok) throw new Error(preferences.detail ?? 'Could not load subscription settings.');
           setSubscriptionId((preferences as Preferences).subscriptionId);
@@ -259,6 +268,19 @@ export default function CompareCostsPage() {
   );
   const costPeriodIsRecent = !costData?.previousRange ||
     costData.range.to >= costData.previousRange.to;
+  const comparisonDatesMatch = Boolean(
+    costData &&
+    costData.range.from === startDate &&
+    costData.range.to === endDate &&
+    costData.previousRange?.from === comparisonStartDate &&
+    costData.previousRange?.to === comparisonEndDate,
+  );
+  const comparisonNeedsRefresh = Boolean(
+    costData && (
+      !comparisonDatesMatch ||
+      costData.granularity !== granularity
+    ),
+  );
   const recentRange = costPeriodIsRecent ? costData?.range : costData?.previousRange;
   const earlierRange = costPeriodIsRecent ? costData?.previousRange : costData?.range;
   const costPeriodTotal = costData
@@ -288,10 +310,22 @@ export default function CompareCostsPage() {
     const earlier = costPeriodIsRecent ? service.previous : service.current;
     return { ...service, recent, earlier, change: recent - earlier };
   });
-  const serviceOptions = serviceComparisonByRecency
+  const comparisonServiceOptions = serviceComparisonByRecency
     .slice()
     .sort((first, second) => second.recent + second.earlier - first.recent - first.earlier
       || first.name.localeCompare(second.name));
+  const serviceLookupKey = JSON.stringify([
+    subscriptionId,
+    startDate,
+    endDate,
+    comparisonStartDate,
+    comparisonEndDate,
+  ]);
+  const serviceOptions = availableServices?.key === serviceLookupKey
+    ? availableServices.services
+    : comparisonDatesMatch
+      ? comparisonServiceOptions
+      : [];
   const topServices = serviceComparisonByRecency
     .slice()
     .sort((first, second) => second.recent - first.recent || first.name.localeCompare(second.name))
@@ -379,8 +413,9 @@ export default function CompareCostsPage() {
       second.cost - first.cost || first.resourceId.localeCompare(second.resourceId));
   }
 
-  async function compareCosts() {
-    if (!subscriptionId || !rangesAreValid || busy) return;
+  const compareCosts = useCallback(async () => {
+    if (!subscriptionId || !rangesAreValid || comparisonRequestInProgress.current) return;
+    comparisonRequestInProgress.current = true;
     setBusy(true);
     setError(null);
     try {
@@ -414,18 +449,93 @@ export default function CompareCostsPage() {
           'The backend returned dates that do not match your selections. Restart the backend so it loads the latest comparison code, then try again.',
         );
       }
-      setSelectedService('all');
+      setSelectedService((current) =>
+        current !== 'all' && !result.serviceComparison.some((service) => service.name === current)
+          ? 'all'
+          : current,
+      );
       setSelectedResourceId('all');
       setCostData({ ...result, granularity });
     } catch (requestError) {
       setError(requestError instanceof Error ? requestError.message : 'Could not compare Azure costs.');
     } finally {
+      comparisonRequestInProgress.current = false;
       setBusy(false);
     }
+  }, [
+    comparisonEndDate,
+    comparisonStartDate,
+    endDate,
+    granularity,
+    rangesAreValid,
+    startDate,
+    subscriptionId,
+  ]);
+
+  async function loadAvailableServices() {
+    if (!subscriptionId || !rangesAreValid || serviceLookupInProgress.current) return;
+    serviceLookupInProgress.current = true;
+    setLoadingServices(true);
+    setError(null);
+    try {
+      const ranges = [
+        { start: startDate, end: endDate },
+        { start: comparisonStartDate, end: comparisonEndDate },
+      ];
+      const servicesByName = new Map<string, AvailableService>();
+      for (const range of ranges) {
+        const params = new URLSearchParams({
+          subscription_id: subscriptionId,
+          start_date: range.start,
+          end_date: range.end,
+          granularity: 'Daily',
+          compare: 'false',
+        });
+        const response = await fetch(`/api/costs?${params}`, { cache: 'no-store' });
+        const payload = await response.json().catch(() => ({}));
+        if (!response.ok) {
+          const retryAfter = response.headers.get('Retry-After');
+          const retryMessage = retryAfter ? ` Retry after ${retryAfter} seconds.` : '';
+          throw new Error(`${payload.detail ?? `Could not load Azure services (${response.status}).`}${retryMessage}`);
+        }
+        const result = payload as { byService?: AvailableService[] };
+        (result.byService ?? []).forEach((service) => {
+          const current = servicesByName.get(service.name);
+          servicesByName.set(service.name, {
+            name: service.name,
+            cost: (current?.cost ?? 0) + service.cost,
+          });
+        });
+      }
+      setAvailableServices({
+        key: serviceLookupKey,
+        services: Array.from(servicesByName.values())
+          .sort((first, second) => second.cost - first.cost || first.name.localeCompare(second.name)),
+      });
+      setSelectedService('all');
+      setSelectedResourceId('all');
+    } catch (requestError) {
+      setError(requestError instanceof Error ? requestError.message : 'Could not load Azure services.');
+    } finally {
+      serviceLookupInProgress.current = false;
+      setLoadingServices(false);
+    }
+  }
+
+  function updateComparisonDate(setter: (value: string) => void, value: string) {
+    setter(value);
+    setSelectedService('all');
+    setSelectedResourceId('all');
+    setAvailableServices(null);
+    setError(null);
   }
 
   function exportBillingCsv() {
     if (!costData) return;
+    if (selectedService !== 'all' && !costData.serviceComparison.some((service) => service.name === selectedService)) {
+      setError('The selected Azure service is not present in the comparison results. Run the comparison again.');
+      return;
+    }
 
     type ResourceCost = {
       resourceId: string;
@@ -435,9 +545,9 @@ export default function CompareCostsPage() {
       const costs = new Map<string, Map<string, ResourceCost>>();
       trends.forEach((trend) => {
         const periodCosts = new Map<string, ResourceCost>();
-        const services = selectedService === 'all'
-          ? trend.services
-          : trend.services.filter((service) => service.name === selectedService);
+        const services = trend.services.filter((service) =>
+          selectedService === 'all' || service.name === selectedService,
+        );
         services.forEach((service) => {
           service.resources
             .filter((resource) =>
@@ -515,7 +625,10 @@ export default function CompareCostsPage() {
     const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8' }));
     const link = document.createElement('a');
     link.href = url;
-    link.download = `azure-cost-billing-daily-${costData.range.from}-to-${costData.range.to}-vs-${costData.previousRange?.from}-to-${costData.previousRange?.to}.csv`;
+    const serviceFileName = selectedService === 'all'
+      ? 'all-services'
+      : selectedService.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+    link.download = `azure-cost-billing-${serviceFileName}-${costData.range.from}-to-${costData.range.to}-vs-${costData.previousRange?.from}-to-${costData.previousRange?.to}.csv`;
     link.click();
     URL.revokeObjectURL(url);
   }
@@ -603,7 +716,7 @@ export default function CompareCostsPage() {
                       type="date"
                       value={startDate}
                       max={endDate < dateOffset(0) ? endDate : dateOffset(0)}
-                      onChange={(event) => setStartDate(event.target.value)}
+                      onChange={(event) => updateComparisonDate(setStartDate, event.target.value)}
                     />
                   </label>
                   <label className="text-sm font-medium text-slate-200">
@@ -614,7 +727,7 @@ export default function CompareCostsPage() {
                       value={endDate}
                       min={startDate}
                       max={dateOffset(0)}
-                      onChange={(event) => setEndDate(event.target.value)}
+                      onChange={(event) => updateComparisonDate(setEndDate, event.target.value)}
                     />
                   </label>
                   </div>
@@ -631,7 +744,7 @@ export default function CompareCostsPage() {
                       type="date"
                       value={comparisonStartDate}
                       max={comparisonEndDate && comparisonEndDate < dateOffset(0) ? comparisonEndDate : dateOffset(0)}
-                      onChange={(event) => setComparisonStartDate(event.target.value)}
+                      onChange={(event) => updateComparisonDate(setComparisonStartDate, event.target.value)}
                     />
                   </label>
                   <label className="text-sm font-medium text-slate-200">
@@ -642,7 +755,7 @@ export default function CompareCostsPage() {
                       value={comparisonEndDate}
                       min={comparisonStartDate || undefined}
                       max={dateOffset(0)}
-                      onChange={(event) => setComparisonEndDate(event.target.value)}
+                      onChange={(event) => updateComparisonDate(setComparisonEndDate, event.target.value)}
                     />
                   </label>
                   </div>
@@ -663,18 +776,40 @@ export default function CompareCostsPage() {
                   </select>
                 </label>
                 <label className="text-sm font-semibold text-slate-200 sm:w-64">
-                  <span className="flex items-center gap-2">
-                    <Boxes size={21} className="text-cyan-400" aria-hidden="true" />Azure service
+                  <span className="flex items-center justify-between gap-2">
+                    <span className="flex items-center gap-2">
+                      <Boxes size={21} className="text-cyan-400" aria-hidden="true" />Azure service
+                    </span>
+                    <button
+                      type="button"
+                      className="text-xs font-semibold text-cyan-300 underline decoration-cyan-700 underline-offset-4 hover:text-cyan-100 disabled:cursor-not-allowed disabled:opacity-50"
+                      disabled={!rangesAreValid || !subscriptionId || loadingServices || busy}
+                      onClick={() => void loadAvailableServices()}
+                    >
+                      {loadingServices
+                        ? 'Loading...'
+                        : availableServices?.key === serviceLookupKey
+                          ? 'Refresh list'
+                          : 'Load services'}
+                    </button>
                   </span>
                   <select
                     className="mt-2 h-12 w-full rounded-xl border border-sky-800 bg-slate-950/80 px-4 text-white outline-none focus:border-cyan-400"
                     value={selectedService}
+                    disabled={loadingServices || busy}
                     onChange={(event) => {
                       setSelectedService(event.target.value);
                       setSelectedResourceId('all');
                     }}
                   >
                     <option value="all">All services</option>
+                    {serviceOptions.length === 0 && (
+                      <option value="loading" disabled>
+                        {loadingServices
+                          ? 'Loading services for selected dates...'
+                          : 'Load services to choose one'}
+                      </option>
+                    )}
                     {serviceOptions.map((service) => (
                       <option key={service.name} value={service.name}>{service.name}</option>
                     ))}
@@ -683,13 +818,32 @@ export default function CompareCostsPage() {
                 <button
                   type="button"
                   className="primary-button min-h-12 gap-2 rounded-xl bg-gradient-to-r from-sky-500 to-blue-600 px-6 text-base font-semibold shadow-lg shadow-blue-950/40"
-                  disabled={!rangesAreValid || busy}
+                  disabled={!rangesAreValid || busy || loadingServices}
                   onClick={() => void compareCosts()}
                 >
                   <ArrowLeftRight size={23} aria-hidden="true" />
                   {busy ? 'Loading comparison...' : 'Compare these date ranges'}
                 </button>
+                {costData && (
+                  <button
+                    type="button"
+                    className="secondary-button min-h-12 gap-2"
+                    disabled={busy || comparisonNeedsRefresh}
+                    onClick={exportBillingCsv}
+                    title={selectedService === 'all'
+                      ? 'Export the current report for all Azure services'
+                      : `Export the current report for ${selectedService} only`}
+                  >
+                    <Download size={18} aria-hidden="true" />
+                    {selectedService === 'all' ? 'Export all services' : 'Export selected service'}
+                  </button>
+                )}
               </div>
+              {comparisonNeedsRefresh && (
+                <p role="status" className="rounded-xl border border-cyan-800/70 bg-cyan-950/30 px-4 py-3 text-sm text-cyan-100">
+                  Selections changed. Choose the billing display and service, then click Compare to update the results.
+                </p>
+              )}
               {!rangesAreValid && (
                 <p className={`flex items-center gap-3 rounded-xl border px-4 py-3 text-sm ${
                   rangesOverlap
@@ -876,11 +1030,11 @@ export default function CompareCostsPage() {
                 )}
 
                 <section className="dashboard-card">
+                  {costData.granularity === 'Daily' && (
+                    <>
                   <div className="mb-4 flex flex-wrap items-start justify-between gap-3">
                     <div>
-                      <h2 className="text-lg font-semibold text-white">
-                        {costData.granularity === 'Cumulative' ? 'Cumulative billing by day' : 'Billing details by day'}
-                      </h2>
+                      <h2 className="text-lg font-semibold text-white">Billing details by day</h2>
                       <p className="mt-1 text-sm text-slate-400">
                         {selectedService === 'all' ? 'All services' : selectedService}
                         {selectedResourceId === 'all'
@@ -888,14 +1042,6 @@ export default function CompareCostsPage() {
                           : ` · ${resourceNameFromId(selectedResourceId)}`}
                       </p>
                     </div>
-                    <button
-                      type="button"
-                      className="secondary-button gap-2"
-                      onClick={exportBillingCsv}
-                    >
-                      <Download size={16} aria-hidden="true" />
-                      Export resource report
-                    </button>
                   </div>
                   <div className="grid gap-4 xl:grid-cols-2">
                     {[
@@ -921,6 +1067,11 @@ export default function CompareCostsPage() {
                       .map(({ isCostPeriod, label, rows, servicesByPeriod, resourcesByServiceAndPeriod }) => {
                       let cumulativeTotal = 0;
                       let previousCumulativeTotal = 0;
+                      const cumulativeServices = new Map<string, {
+                        name: string;
+                        cost: number;
+                        resources: Map<string, { resourceId: string; cost: number }>;
+                      }>();
                       return (
                       <div key={label} className="min-w-0 rounded-xl border border-sky-900/70 bg-slate-950/45 p-2 sm:p-3">
                           <div className="overflow-hidden rounded-lg border border-slate-800">
@@ -950,6 +1101,38 @@ export default function CompareCostsPage() {
                                   selectedService,
                                   selectedResourceId,
                                 );
+                                const dayCost = dayBreakdown.total;
+                                cumulativeTotal += dayCost;
+                                dayBreakdown.services.forEach((service) => {
+                                  const accumulatedService = cumulativeServices.get(service.name) ?? {
+                                    name: service.name,
+                                    cost: 0,
+                                    resources: new Map<string, { resourceId: string; cost: number }>(),
+                                  };
+                                  accumulatedService.cost += service.cost;
+                                  service.resources.forEach((resource) => {
+                                    const key = resource.resourceId.toLowerCase();
+                                    const accumulatedResource = accumulatedService.resources.get(key);
+                                    accumulatedService.resources.set(key, {
+                                      resourceId: accumulatedResource?.resourceId ?? resource.resourceId,
+                                      cost: (accumulatedResource?.cost ?? 0) + resource.cost,
+                                    });
+                                  });
+                                  cumulativeServices.set(service.name, accumulatedService);
+                                });
+                                const cumulativeBreakdown = {
+                                  services: Array.from(cumulativeServices.values())
+                                    .map((service) => ({
+                                      ...service,
+                                      resources: Array.from(service.resources.values())
+                                        .sort((first, second) => second.cost - first.cost),
+                                    }))
+                                    .sort((first, second) => second.cost - first.cost),
+                                  total: cumulativeTotal,
+                                };
+                                const displayedBreakdown = costData.granularity === 'Cumulative'
+                                  ? cumulativeBreakdown
+                                  : dayBreakdown;
                                 const previousRow = rows[index - 1];
                                 const previousBreakdown = previousRow
                                   ? filterBillingServices(
@@ -959,8 +1142,6 @@ export default function CompareCostsPage() {
                                     selectedResourceId,
                                   )
                                   : null;
-                                const dayCost = dayBreakdown.total;
-                                cumulativeTotal += dayCost;
                                 const displayedCost = costData.granularity === 'Cumulative'
                                   ? cumulativeTotal
                                   : dayCost;
@@ -999,22 +1180,27 @@ export default function CompareCostsPage() {
                                           : `${changePercent > 0 ? '↑ +' : changePercent < 0 ? '↓ ' : ''}${changePercent.toFixed(1)}%`}
                                       </span>
                                       <span className="justify-self-end whitespace-nowrap rounded-full border border-slate-700 bg-slate-800/80 px-2 py-1 text-[10px] text-slate-300">
-                                        {dayBreakdown.services.length} {dayBreakdown.services.length === 1 ? 'service' : 'services'}
+                                        {displayedBreakdown.services.length} {displayedBreakdown.services.length === 1 ? 'service' : 'services'}
                                       </span>
                                     </summary>
                                     <div className="mb-3 ml-2 rounded-lg border border-slate-800 bg-slate-900/65 p-3 sm:ml-5">
-                                      {dayBreakdown.services.length === 0 ? (
+                                      {displayedBreakdown.services.length === 0 ? (
                                         <p className="text-xs text-slate-400">No billing details for this selection on this date.</p>
                                       ) : (
                                         <>
+                                          {costData.granularity === 'Cumulative' && (
+                                            <p className="mb-2 text-[10px] text-slate-400">
+                                              Running totals from the start of this period
+                                            </p>
+                                          )}
                                           <div className="mb-2 grid grid-cols-[minmax(0,1fr)_auto_auto] gap-3 border-b border-slate-700/80 pb-2 text-[10px] uppercase tracking-wide text-slate-400">
                                             <span>Service</span>
                                             <span className="text-right">Cost</span>
                                             <span className="w-20 text-right">Share</span>
                                           </div>
                                           <div className="space-y-2.5">
-                                            {dayBreakdown.services.map((service) => {
-                                              const share = dayBreakdown.total > 0 ? (service.cost / dayBreakdown.total) * 100 : 0;
+                                            {displayedBreakdown.services.map((service) => {
+                                              const share = displayedBreakdown.total > 0 ? (service.cost / displayedBreakdown.total) * 100 : 0;
                                               return (
                                                 <details
                                                   key={`${row.period}-${service.name}`}
@@ -1083,6 +1269,8 @@ export default function CompareCostsPage() {
                       );
                     })}
                   </div>
+                    </>
+                  )}
                   {costData.granularity === 'Cumulative' && (
                     <div className={`mt-5 grid items-center gap-4 rounded-2xl border p-4 sm:grid-cols-[48px_minmax(0,1fr)_auto_auto] sm:gap-4 sm:p-5 ${
                       recentTotalChange > 0
