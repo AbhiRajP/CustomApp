@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import os
 import secrets
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from typing import Any
+from urllib.parse import urlparse
+from uuid import UUID
 
 import msal
 from cryptography.fernet import Fernet, InvalidToken
@@ -37,6 +39,23 @@ def get_oauth_config() -> AzureOAuthConfig | None:
     if not client_id or not client_secret or not encryption_key:
         return None
 
+    authority = os.getenv(
+        "AZURE_AUTHORITY",
+        "https://login.microsoftonline.com/common",
+    ).rstrip("/")
+    parsed_authority = urlparse(authority)
+    if (
+        parsed_authority.scheme != "https"
+        or parsed_authority.netloc.lower() != "login.microsoftonline.com"
+        or parsed_authority.path not in {"/common", "/organizations"}
+        or parsed_authority.query
+        or parsed_authority.fragment
+    ):
+        raise HTTPException(
+            status_code=500,
+            detail="AZURE_AUTHORITY must use the shared Microsoft Entra common or organizations endpoint.",
+        )
+
     try:
         Fernet(encryption_key.encode("ascii"))
     except (ValueError, UnicodeEncodeError) as exc:
@@ -48,13 +67,10 @@ def get_oauth_config() -> AzureOAuthConfig | None:
     return AzureOAuthConfig(
         client_id=client_id,
         client_secret=client_secret,
-        authority=os.getenv(
-            "AZURE_AUTHORITY",
-            "https://login.microsoftonline.com/organizations",
-        ),
+        authority=authority,
         redirect_uri=os.getenv(
             "AZURE_REDIRECT_URI",
-            "http://127.0.0.1:8000/api/auth/callback",
+            "http://127.0.0.1:3000/api/auth/callback",
         ),
         frontend_origin=os.getenv("APP_ORIGIN", "http://127.0.0.1:3000").rstrip("/"),
         encryption_key=encryption_key.encode("ascii"),
@@ -131,6 +147,7 @@ def get_arm_access_token_for_record(
     db: Session,
 ) -> tuple[str, AzureAuthSession, dict[str, Any]]:
     config = require_config()
+    tenant_config = config_for_tenant(config, record.tenant_id)
     expires_at = record.expires_at
     if expires_at.tzinfo is None:
         expires_at = expires_at.replace(tzinfo=timezone.utc)
@@ -138,7 +155,7 @@ def get_arm_access_token_for_record(
         raise HTTPException(status_code=401, detail="Your Azure session has expired. Connect again.")
     cache = msal.SerializableTokenCache()
     cache.deserialize(decrypt_cache(config, record.encrypted_token_cache))
-    client = create_msal_app(config, cache)
+    client = create_msal_app(tenant_config, cache)
     account = next(
         (
             candidate
@@ -170,3 +187,23 @@ def create_authorization_url(config: AzureOAuthConfig) -> tuple[str, str]:
         prompt="consent",
     )
     return url, state
+
+
+def validate_tenant_id(tenant_id: Any) -> str:
+    if not isinstance(tenant_id, str):
+        raise HTTPException(status_code=401, detail="Microsoft did not return a valid organization tenant.")
+    try:
+        return str(UUID(tenant_id))
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=401,
+            detail="Microsoft did not return a valid organization tenant.",
+        ) from exc
+
+
+def config_for_tenant(config: AzureOAuthConfig, tenant_id: Any) -> AzureOAuthConfig:
+    validated_tenant_id = validate_tenant_id(tenant_id)
+    return replace(
+        config,
+        authority=f"https://login.microsoftonline.com/{validated_tenant_id}",
+    )

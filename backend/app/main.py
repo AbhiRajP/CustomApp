@@ -27,6 +27,7 @@ from app.services.azure_auth import (
     get_arm_access_token,
     get_oauth_config,
     require_config,
+    validate_tenant_id,
 )
 from app.services.cost_scheduler import run_cost_collection_scheduler
 from app.services.azure_monitoring import (
@@ -213,9 +214,9 @@ def auth_callback(
     if not accounts:
         raise HTTPException(status_code=401, detail="Microsoft sign-in completed without an account.")
     claims = result.get("id_token_claims") or {}
-    tenant_id = claims.get("tid")
+    tenant_id = validate_tenant_id(claims.get("tid"))
     home_account_id = accounts[0].get("home_account_id")
-    if not tenant_id or not home_account_id:
+    if not home_account_id:
         raise HTTPException(status_code=401, detail="Microsoft did not return the required tenant/account identifiers.")
 
     session_id = secrets.token_urlsafe(32)
