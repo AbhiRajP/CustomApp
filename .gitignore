@@ -1,0 +1,41 @@
+# Node.js
+node_modules/
+.next/
+dist/
+
+# Python virtual environments
+backend/.venv/
+backend/.venv312/
+backend/venv/
+
+# Python cache
+__pycache__/
+**/__pycache__/
+backend/**/__pycache__/
+*.pyc
+*.pyo
+
+# Environment variables
+.env
+.env.*
+!.env.example
+backend/.env
+frontend/.env
+frontend/.env.*
+
+# Database files
+*.db
+
+# IDE and OS
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+# Next.js
+frontend/.next/
+frontend/out/
+
+# TypeScript build cache
+*.tsbuildinfo
