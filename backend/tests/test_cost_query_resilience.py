@@ -45,6 +45,39 @@ class CostQueryResilienceTests(unittest.TestCase):
         self.engine.dispose()
         self.temp_dir.cleanup()
 
+    def test_arm_requests_send_authenticated_bearer_token(self) -> None:
+        response = requests.Response()
+        response.status_code = 200
+        response._content = b"{}"
+
+        with patch.object(azure_monitoring.requests, "request", return_value=response) as request:
+            azure_monitoring._request_once(
+                "GET",
+                "https://management.azure.com/subscriptions",
+                "access-token-test",
+                request_headers={"ClientType": "test-client"},
+            )
+
+        headers = request.call_args.kwargs["headers"]
+        self.assertEqual(headers["Authorization"], "Bearer access-token-test")
+        self.assertEqual(headers["ClientType"], "test-client")
+
+    def test_cost_details_requests_send_authenticated_bearer_token(self) -> None:
+        response = requests.Response()
+        response.status_code = 200
+
+        with patch.object(azure_monitoring.requests, "request", return_value=response) as request:
+            azure_monitoring._cost_details_request(
+                "POST",
+                "https://management.azure.com/subscriptions/costdetails",
+                "cost-details-token-test",
+            )
+
+        self.assertEqual(
+            request.call_args.kwargs["headers"]["Authorization"],
+            "Bearer cost-details-token-test",
+        )
+
     def test_cost_details_export_returns_requested_report_columns(self) -> None:
         operation_response = requests.Response()
         operation_response.status_code = 200

@@ -31,6 +31,7 @@ export default function ConnectAzurePage() {
   const [auth, setAuth] = useState<AuthStatus | null>(null);
   const [subscriptions, setSubscriptions] = useState<AzureSubscription[]>([]);
   const [preferences, setPreferences] = useState<Preferences>(emptyPreferences);
+  const [savedSubscriptionId, setSavedSubscriptionId] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -43,6 +44,7 @@ export default function ConnectAzurePage() {
     ]);
     setSubscriptions(subscriptionResponse.items);
     setPreferences(savedPreferences);
+    setSavedSubscriptionId(savedPreferences.subscriptionId);
   }, []);
 
   const refreshAuth = useCallback(async () => {
@@ -58,6 +60,7 @@ export default function ConnectAzurePage() {
       } else {
         setSubscriptions([]);
         setPreferences(emptyPreferences);
+        setSavedSubscriptionId(null);
       }
     } catch (requestError) {
       setError(requestError instanceof Error ? requestError.message : 'Could not load Azure connection.');
@@ -70,20 +73,17 @@ export default function ConnectAzurePage() {
     void refreshAuth();
   }, [refreshAuth]);
 
-  async function savePreferences() {
-    if (!preferences.subscriptionId) {
-      setError('Select a subscription first.');
-      return;
-    }
+  async function savePreferences(subscriptionId = preferences.subscriptionId) {
     setSaving(true);
     setError(null);
     setNotice(null);
     try {
       const saved = await apiRequest<Preferences>('/api/preferences', {
         method: 'PUT',
-        body: JSON.stringify(preferences),
+        body: JSON.stringify({ subscriptionId }),
       });
       setPreferences(saved);
+      setSavedSubscriptionId(saved.subscriptionId);
       setNotice('Subscription preference saved for your Azure tenant.');
     } catch (requestError) {
       setError(requestError instanceof Error ? requestError.message : 'Could not save your subscription preference.');
@@ -159,9 +159,15 @@ export default function ConnectAzurePage() {
                   <select
                     className="mt-2 w-full rounded-xl border border-slate-600 bg-slate-950/80 px-4 py-3 text-white focus:border-cyan-400 focus:outline-none"
                     value={preferences.subscriptionId ?? ''}
+                    disabled={saving}
                     onChange={(event) => {
-                      setPreferences({ subscriptionId: event.target.value || null });
+                      const subscriptionId = event.target.value || null;
+                      setPreferences({ subscriptionId });
                       setNotice(null);
+                      setError(null);
+                      if (subscriptionId !== savedSubscriptionId) {
+                        void savePreferences(subscriptionId);
+                      }
                     }}
                   >
                     <option value="">Select a subscription</option>
@@ -173,10 +179,24 @@ export default function ConnectAzurePage() {
                   </select>
                 </label>
                 <div className="mt-5 flex flex-wrap gap-3">
-                  <button className="primary-button" disabled={saving || !preferences.subscriptionId} onClick={() => void savePreferences()}>
-                    {saving ? 'Saving...' : 'Save subscription'}
+                  <button
+                    className="primary-button"
+                    disabled={saving || preferences.subscriptionId === savedSubscriptionId}
+                    onClick={() => void savePreferences()}
+                  >
+                    {saving ? 'Saving...' : preferences.subscriptionId === savedSubscriptionId ? 'Subscription saved' : 'Save subscription'}
                   </button>
-                  <a className="secondary-button" href="/">Open cost dashboard</a>
+                  <a
+                    className={`secondary-button ${saving || preferences.subscriptionId !== savedSubscriptionId ? 'pointer-events-none opacity-50' : ''}`}
+                    href="/"
+                    aria-disabled={saving || preferences.subscriptionId !== savedSubscriptionId}
+                    tabIndex={saving || preferences.subscriptionId !== savedSubscriptionId ? -1 : undefined}
+                    onClick={(event) => {
+                      if (saving || preferences.subscriptionId !== savedSubscriptionId) event.preventDefault();
+                    }}
+                  >
+                    Open cost dashboard
+                  </a>
                   <button className="secondary-button" disabled={loading} onClick={() => void refreshAuth()}>Refresh</button>
                   <DisconnectButton />
                 </div>

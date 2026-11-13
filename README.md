@@ -44,7 +44,7 @@ docker compose up --build
 
 Open the frontend at `http://127.0.0.1:3000` when the `.env` callback and origin use `127.0.0.1`. The compose setup passes `backend/.env` to the backend container at runtime, stores SQLite data in a named volume, and builds the frontend API proxy with the internal backend address. The Dockerfiles do not copy `.env` or credentials into either image; `.dockerignore` excludes environment files and local build artifacts.
 
-For production Docker or Kubernetes, inject `AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET`, `AZURE_AUTHORITY`, `AZURE_REDIRECT_URI`, `AZURE_TOKEN_ENCRYPTION_KEY`, and `APP_ORIGIN` from the platform's secret/configuration manager at runtime. Use HTTPS, set `APP_COOKIE_SECURE=true`, use a shared durable database for backend replicas, and keep the encryption key stable across replicas and restarts. Changing that key invalidates existing saved Azure sessions. Never put secrets in Docker build arguments, image layers, frontend build variables, or source control.
+For production Docker or Kubernetes, inject `AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET`, `AZURE_AUTHORITY`, `AZURE_REDIRECT_URI`, `AZURE_TOKEN_ENCRYPTION_KEY`, and `APP_ORIGIN` from the platform's secret/configuration manager at runtime; set `APP_ENV=production`. Production mode rejects non-HTTPS origins/callbacks or `APP_COOKIE_SECURE=false`. Use a shared durable database for backend replicas, and keep the encryption key stable across replicas and restarts. Changing that key invalidates existing saved Azure sessions. Never put secrets in Docker build arguments, image layers, frontend build variables, or source control.
 
 ## App behavior
 

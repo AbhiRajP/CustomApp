@@ -64,23 +64,36 @@ def get_oauth_config() -> AzureOAuthConfig | None:
             detail="AZURE_TOKEN_ENCRYPTION_KEY must be a valid Fernet key.",
         ) from exc
 
+    redirect_uri = os.getenv(
+        "AZURE_REDIRECT_URI",
+        "http://127.0.0.1:3000/api/auth/callback",
+    )
+    frontend_origin = os.getenv("APP_ORIGIN", "http://127.0.0.1:3000").rstrip("/")
+    secure_cookie = os.getenv(
+        "APP_COOKIE_SECURE",
+        "true"
+        if frontend_origin.startswith("https://") or redirect_uri.startswith("https://")
+        else "false",
+    ).lower() == "true"
+    if os.getenv("APP_ENV", "development").lower() in {"prod", "production"}:
+        if (
+            not secure_cookie
+            or not frontend_origin.startswith("https://")
+            or not redirect_uri.startswith("https://")
+        ):
+            raise HTTPException(
+                status_code=500,
+                detail="Production requires HTTPS APP_ORIGIN and AZURE_REDIRECT_URI with APP_COOKIE_SECURE=true.",
+            )
+
     return AzureOAuthConfig(
         client_id=client_id,
         client_secret=client_secret,
         authority=authority,
-        redirect_uri=os.getenv(
-            "AZURE_REDIRECT_URI",
-            "http://127.0.0.1:3000/api/auth/callback",
-        ),
-        frontend_origin=os.getenv("APP_ORIGIN", "http://127.0.0.1:3000").rstrip("/"),
+        redirect_uri=redirect_uri,
+        frontend_origin=frontend_origin,
         encryption_key=encryption_key.encode("ascii"),
-        secure_cookie=os.getenv(
-            "APP_COOKIE_SECURE",
-            "true"
-            if os.getenv("APP_ORIGIN", "").startswith("https://")
-            or os.getenv("AZURE_REDIRECT_URI", "").startswith("https://")
-            else "false",
-        ).lower() == "true",
+        secure_cookie=secure_cookie,
     )
 
 
@@ -199,6 +212,17 @@ def validate_tenant_id(tenant_id: Any) -> str:
             status_code=401,
             detail="Microsoft did not return a valid organization tenant.",
         ) from exc
+
+
+def validate_tenant_claims(claims: Any) -> str:
+    if not isinstance(claims, dict):
+        raise HTTPException(status_code=401, detail="Microsoft did not return valid organization claims.")
+    tenant_id = validate_tenant_id(claims.get("tid"))
+    issuer = claims.get("iss")
+    expected_issuer = f"https://login.microsoftonline.com/{tenant_id}/v2.0"
+    if not isinstance(issuer, str) or issuer.rstrip("/").lower() != expected_issuer.lower():
+        raise HTTPException(status_code=401, detail="Microsoft returned an invalid organization token issuer.")
+    return tenant_id
 
 
 def config_for_tenant(config: AzureOAuthConfig, tenant_id: Any) -> AzureOAuthConfig:
